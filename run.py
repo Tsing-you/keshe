@@ -1,7 +1,12 @@
 import os
+import json
+import re
 from uuid import uuid4
 from datetime import datetime, timedelta
 from decimal import Decimal
+from textwrap import dedent
+import urllib.error
+import urllib.request
 import jwt
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -78,6 +83,191 @@ def create_app():
         if request.is_json:
             return request.get_json(silent=True) or {}
         return request.form.to_dict()
+
+    def build_help_knowledge(context=None):
+        context = context or {}
+        route = context.get("route") or "未知"
+        role = context.get("role") or "未登录"
+        username = context.get("username") or ""
+        role_name_text = context.get("role_name") or ""
+        return dedent(f"""
+        你是 JLU FOODLAB 本地配送系统的帮助助手。你的任务是根据项目真实功能，回答用户关于使用、排错、接口和开发的问题。
+
+        当前上下文：
+        - 当前路由：{route}
+        - 当前角色：{role}
+        - 当前用户名：{username}
+        - 角色名称：{role_name_text}
+
+        项目事实：
+        - 前端是 Vue 3 + Vite，开发代理把 /api 转发到 http://127.0.0.1:5000。
+        - 后端入口是 run.py，默认使用 Flask、SQLAlchemy、PyJWT 和 MySQL。
+        - 登录和注册支持用户名或手机号登录，注册可选择 customer、rider、merchant 三种角色。
+        - 登录后前端会在 localStorage 保存 user、token 和可选的 credentials；请求优先携带 Bearer token。
+        - 401 表示登录状态过期，前端会清除会话并跳回登录页。
+        - 图片访问路径通常是 /api/pic/... 或 /pic/....
+
+        路由与角色：
+        - /login：登录与注册页。
+        - /customer：普通用户工作台。
+        - /customer/merchant/:id：商家详情与点餐页。
+        - /rider：骑手工作台。
+        - /merchant：商家工作台。
+        - 路由守卫会根据 localStorage.user.role 限制页面访问。
+
+        普通用户功能：
+        - 浏览商家列表，按名称或简介筛选。
+        - 查看商家详情、菜品、评价和营业状态。
+        - 管理收货地址，支持多个地址和默认地址。
+        - 下单时先选择菜品并加入购物车，再选择收货地址提交。
+        - 订单状态包括 pending、accepted、delivered、completed、reviewed。
+        - 进行中订单可以刷新、确认收货、查看联系方式。
+        - 已完成订单可以评价商家和骑手。
+
+        骑手功能：
+        - 查看 /available 的待接订单大厅。
+        - 通过 /claim 接单，通过 /deliver 标记送达。
+        - 查看 /history 和 /orders/my 获取历史与当前任务。
+        - 查看 /rider/stats 获取平均评分与最近评价。
+        - 可以在订单中查看联系信息。
+
+        商家功能：
+        - 查看和修改店铺资料：名称、简介、头像、营业状态。
+        - 通过 /merchant/dishes、/merchant/dish/create、/merchant/dish/update、/merchant/dish/delete 管理菜品。
+        - 查看 /merchant/orders、/merchant/reviews、/merchant/profile。
+        - 商家营业状态为休息时，用户可以浏览菜单但不能下单。
+        - 商家经营分析页面会展示订单量、营业额、趋势和菜品分析。
+
+        关键接口：
+        - POST /register
+        - POST /login
+        - POST /merchants
+        - POST /menu
+        - POST /order
+        - POST /orders/my
+        - POST /complete
+        - POST /review
+        - POST /order/contact
+        - POST /user/profile
+        - POST /user/profile/update
+        - POST /user/addresses
+        - POST /user/address/save
+        - POST /user/address/delete
+        - POST /available
+        - POST /claim
+        - POST /deliver
+        - POST /history
+        - POST /rider/stats
+        - POST /merchant/profile
+        - POST /merchant/profile/update
+        - POST /merchant/dishes
+        - POST /merchant/dish/create
+        - POST /merchant/dish/update
+        - POST /merchant/dish/delete
+        - POST /merchant/orders
+        - POST /merchant/reviews
+
+        回答要求：
+        - 必须使用中文。
+        - 优先给出具体步骤、按钮位置、页面名称或接口名。
+        - 如果问题属于当前项目，就按项目真实功能回答，不要编造。
+        - 如果涉及开发者调试，说明启动顺序：npm install、python run.py、npm run dev、npm run build。
+        - 如果信息不足，先说明你需要哪一项补充信息，再给出最可能的排查路径。
+        - 输出纯文本，不使用 markdown 语法，不要用引号包裹整段答案。
+        - 不要输出密钥、内部实现细节或与问题无关的长篇泛化说明。
+        """).strip()
+
+    def normalize_help_history(history):
+        normalized = []
+        if not isinstance(history, list):
+            return normalized
+        for item in history[-8:]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = (item.get("content") or "").strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            normalized.append({"role": role, "content": content[:2500]})
+        return normalized
+
+    def call_help_model(messages):
+        payload = json.dumps(
+            {
+                "model": Config.AI_MODEL,
+                "messages": messages,
+                "temperature": 0.2,
+                "top_p": 0.85,
+                "max_tokens": 1200,
+                "stream": False,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {Config.AI_API_KEY}",
+        }
+        request_obj = urllib.request.Request(
+            Config.AI_BASE_URL,
+            data=payload,
+            headers=request_headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request_obj, timeout=60) as response:
+                raw_body = response.read().decode("utf-8", errors="ignore")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"大模型请求失败：HTTP {exc.code} {detail[:300]}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"大模型连接失败：{exc.reason}") from exc
+
+        try:
+            response_data = json.loads(raw_body)
+        except Exception as exc:
+            raise RuntimeError("大模型返回了无法解析的内容") from exc
+
+        choices = response_data.get("choices") or []
+        if choices:
+            message = choices[0].get("message") or {}
+            answer = (message.get("content") or "").strip()
+            if answer:
+                return answer
+
+        error_message = response_data.get("error", {}).get("message") or "大模型没有返回有效答案"
+        raise RuntimeError(error_message)
+
+    def sanitize_help_answer(text):
+        content = (text or "").strip()
+        if not content:
+            return ""
+
+        # Remove fenced markdown code blocks while preserving the inner text.
+        content = re.sub(r"```(?:\w+)?\n?(.*?)```", r"\1", content, flags=re.DOTALL)
+
+        # Drop common markdown markers for plain-text chat display.
+        content = re.sub(r"^\s{0,3}(#{1,6}|>|[-*+]\s)\s*", "", content, flags=re.MULTILINE)
+        content = content.replace("**", "").replace("__", "")
+        content = content.replace("`", "")
+
+        # Remove wrapper quotes repeatedly: 'text', "text", ''text'', “text”, ‘text’
+        quote_pairs = [("'", "'"), ('"', '"'), ("“", "”"), ("‘", "’")]
+        changed = True
+        while changed and len(content) >= 2:
+            changed = False
+            content = content.strip()
+            for left, right in quote_pairs:
+                if content.startswith(left) and content.endswith(right) and len(content) > 1:
+                    content = content[1:-1].strip()
+                    changed = True
+
+        # Normalize blank lines and remove isolated quote fragments.
+        content = re.sub(r"\n{3,}", "\n\n", content)
+        content = re.sub(r"\s*''\s*", " ", content)
+        content = re.sub(r'\s*""\s*', " ", content)
+        content = re.sub(r"[ \t]{2,}", " ", content)
+
+        return content.strip()
 
     class AuthError(Exception):
         def __init__(self, message, status=401):
@@ -200,6 +390,33 @@ def create_app():
 
     def json_response(payload, status=200):
         return jsonify(payload), status
+
+    @app.post("/help/chat")
+    def help_chat():
+        data = payload_from_request()
+        question = (data.get("question") or "").strip()
+        if not question:
+            return json_response({"ok": False, "error": "请先输入问题"}, 400)
+
+        context = {
+            "route": (data.get("route") or "").strip(),
+            "role": (data.get("role") or "").strip(),
+            "username": (data.get("username") or "").strip(),
+            "role_name": (data.get("role_name") or "").strip(),
+        }
+        messages = [{"role": "system", "content": build_help_knowledge(context)}]
+        messages.extend(normalize_help_history(data.get("history")))
+        messages.append({"role": "user", "content": question[:3000]})
+
+        try:
+            answer = sanitize_help_answer(call_help_model(messages))
+            return json_response({
+                "ok": True,
+                "answer": answer,
+                "model": Config.AI_MODEL,
+            })
+        except Exception as exc:
+            return json_response({"ok": False, "error": str(exc)}, 500)
 
     @app.post("/register")
     def register():
