@@ -1,11 +1,24 @@
 ﻿<script setup>
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
+import axios from 'axios'
 import { useRouter, RouterView } from 'vue-router'
+import api from './api'
 import { toasts } from './utils/toast'
+import { showToast } from './utils/toast'
 
 const router = useRouter()
 const showDropdown = ref(false)
 const userState = ref(null)
+const helpOpen = ref(false)
+const helpQuestion = ref('')
+const helpLoading = ref(false)
+const helpChatRef = ref(null)
+const helpMessages = ref([
+  {
+    role: 'assistant',
+    content: '你好，我是系统帮助助手。你可以问我登录、下单、接单、商家管理、接口调用或开发启动相关的问题。',
+  },
+])
 
 const readUser = () => {
   try {
@@ -16,6 +29,21 @@ const readUser = () => {
 }
 
 const user = computed(() => userState.value)
+const currentRoutePath = computed(() => router.currentRoute.value.fullPath)
+
+const helpSuggestions = computed(() => {
+  const common = ['如何注册或登录', '系统支持哪些角色', '如何查看我的订单']
+  if (!user.value) {
+    return [...common, '这个系统是做什么的', '如何开始使用这个项目']
+  }
+  if (user.value.role === 'customer') {
+    return [...common, '普通用户如何下单', '如何添加收货地址', '如何评价订单']
+  }
+  if (user.value.role === 'rider') {
+    return [...common, '骑手如何接单', '如何标记送达', '如何查看评价统计']
+  }
+  return [...common, '商家如何上架菜品', '如何切换营业状态', '如何查看经营分析']
+})
 
 const toggleDropdown = () => {
     showDropdown.value = !showDropdown.value
@@ -29,6 +57,78 @@ const closeDropdown = (e) => {
 
 const syncSession = () => {
   readUser()
+}
+
+const scrollHelpToBottom = async () => {
+  await nextTick()
+  if (helpChatRef.value) {
+    helpChatRef.value.scrollTop = helpChatRef.value.scrollHeight
+  }
+}
+
+const openHelp = async () => {
+  helpOpen.value = true
+  await scrollHelpToBottom()
+}
+
+const closeHelp = () => {
+  helpOpen.value = false
+}
+
+const useSuggestion = (text) => {
+  helpQuestion.value = text
+}
+
+const resetHelp = () => {
+  helpQuestion.value = ''
+  helpMessages.value = [
+    {
+      role: 'assistant',
+      content: '你好，我是系统帮助助手。你可以问我登录、下单、接单、商家管理、接口调用或开发启动相关的问题。',
+    },
+  ]
+}
+
+const sendHelp = async () => {
+  const question = helpQuestion.value.trim()
+  if (!question) {
+    showToast('请先输入问题', 'error')
+    return
+  }
+
+  helpMessages.value.push({ role: 'user', content: question })
+  helpQuestion.value = ''
+  helpLoading.value = true
+  await scrollHelpToBottom()
+
+  try {
+    const res = await axios.post('/api/help/chat', {
+      question,
+      route: currentRoutePath.value,
+      role: user.value?.role || '',
+      role_name: user.value?.role_name || '',
+      username: user.value?.username || '',
+      history: helpMessages.value.slice(0, -1).slice(-10),
+    }, { timeout: 60000 })
+
+    if (res.data.ok) {
+      helpMessages.value.push({
+        role: 'assistant',
+        content: res.data.answer || '暂时没有返回答案，请稍后重试。',
+      })
+    } else {
+      const message = res.data.error || '回答失败'
+      helpMessages.value.push({ role: 'assistant', content: message })
+      showToast(message, 'error')
+    }
+  } catch (err) {
+    const message = err.response?.data?.error || err.message || '帮助服务暂不可用'
+    helpMessages.value.push({ role: 'assistant', content: message })
+    showToast(message, 'error')
+  } finally {
+    helpLoading.value = false
+    await scrollHelpToBottom()
+  }
 }
 
 onMounted(() => {
@@ -106,6 +206,56 @@ const switchAccount = () => {
     <main class="app-main">
       <RouterView :key="$route.fullPath" />
     </main>
+
+    <button class="help-fab" type="button" @click="openHelp">帮助</button>
+
+    <Transition name="help-fade">
+      <div v-if="helpOpen" class="help-overlay" @click.self="closeHelp">
+        <div class="help-panel">
+          <div class="help-header">
+            <div>
+              <div class="help-title">智能帮助</div>
+              <div class="help-subtitle">基于当前页面、角色和项目知识的问答助手</div>
+            </div>
+            <button class="help-close" type="button" @click="closeHelp">×</button>
+          </div>
+
+          <div class="help-suggestions">
+            <button
+              v-for="item in helpSuggestions"
+              :key="item"
+              type="button"
+              class="help-chip"
+              @click="useSuggestion(item)"
+            >
+              {{ item }}
+            </button>
+          </div>
+
+          <div ref="helpChatRef" class="help-chat">
+            <div v-for="(msg, index) in helpMessages" :key="index" :class="['help-bubble', msg.role]">
+              <span class="help-role">{{ msg.role === 'user' ? '你' : '助手' }}</span>
+              <p>{{ msg.content }}</p>
+            </div>
+          </div>
+
+          <form class="help-form" @submit.prevent="sendHelp">
+            <textarea
+              v-model="helpQuestion"
+              rows="4"
+              placeholder="例如：普通用户怎么下单？商家怎么切换营业状态？"
+            ></textarea>
+            <div class="help-actions">
+              <button type="button" class="btn-outline" @click="resetHelp">清空对话</button>
+              <button type="submit" :disabled="helpLoading">
+                <span v-if="!helpLoading">发送</span>
+                <span v-else>思考中...</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -245,6 +395,163 @@ input:focus, textarea:focus, select:focus { background: #fffefb; border-color: #
 .text-sm { font-size: 0.85rem; }
 .empty-state { text-align: center; padding: 4rem 2rem; color: #8e8578; background: var(--surface-2); border-radius: 12px; border: 1px dashed var(--line); font-size: 0.95rem; }
 
+.help-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1200;
+  min-width: 72px;
+  height: 72px;
+  border-radius: 999px;
+  padding: 0 1rem;
+  box-shadow: 0 16px 32px rgba(28, 24, 18, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+.help-fab:hover {
+  transform: translateY(-2px);
+}
+
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  background: rgba(20, 18, 14, 0.42);
+  backdrop-filter: blur(6px);
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
+  padding: 24px;
+}
+
+.help-panel {
+  width: min(100%, 460px);
+  max-height: calc(100vh - 48px);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow: 0 24px 60px rgba(32, 24, 12, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.help-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.2rem 1.2rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #fffefb 0%, #f6f1e5 100%);
+}
+
+.help-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.help-subtitle {
+  margin-top: 0.2rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.help-close {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: #f0e8db;
+  color: #53483c;
+  padding: 0;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.help-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1rem 1.2rem 0;
+}
+
+.help-chip {
+  background: #f4efe4;
+  color: #3f3326;
+  border: 1px solid #e2d8c8;
+  border-radius: 999px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
+}
+
+.help-chat {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.help-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.8rem 0.9rem;
+  border-radius: 16px;
+  border: 1px solid #e8dfd1;
+  background: #fbfaf6;
+}
+
+.help-bubble.user {
+  background: #e9f4ef;
+  border-color: #c6ddd2;
+}
+
+.help-role {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #7b6d5a;
+}
+
+.help-bubble p {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.92rem;
+  color: var(--ink);
+}
+
+.help-form {
+  border-top: 1px solid var(--line);
+  padding: 1rem 1.2rem 1.2rem;
+  background: #fffdf8;
+}
+
+.help-form textarea {
+  resize: vertical;
+  min-height: 94px;
+  max-height: 220px;
+}
+
+.help-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.8rem;
+}
+
+.help-actions button {
+  flex: 1;
+}
+
+.help-fade-enter-active, .help-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.help-fade-enter-from, .help-fade-leave-to {
+  opacity: 0;
+}
+
 @media (max-width: 768px) {
   .container {
     padding: 1.2rem 1rem;
@@ -257,6 +564,22 @@ input:focus, textarea:focus, select:focus { background: #fffefb; border-color: #
 
   .username {
     display: none;
+  }
+
+  .help-overlay {
+    padding: 12px;
+    align-items: stretch;
+  }
+
+  .help-panel {
+    width: 100%;
+    max-height: calc(100vh - 24px);
+  }
+
+  .help-fab {
+    right: 14px;
+    bottom: 14px;
+    height: 64px;
   }
 }
 </style>

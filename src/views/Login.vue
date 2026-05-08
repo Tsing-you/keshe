@@ -90,6 +90,7 @@ const login = async () => {
 
 <template>
   <div class="login-wrapper">
+    <img class="login-decor" src="http://pro.jlu.edu.cn/images/footerlogo.png" alt="" aria-hidden="true" />
     <div class="brand-background">
       <div class="brand-content">
         <h1>Eat Quiet.<br/>Live Sharp.</h1>
@@ -180,6 +181,19 @@ const login = async () => {
   min-height: 100vh;
   margin: -2rem -1.5rem;
   background: #f7f1e7;
+  position: relative;
+  overflow: hidden;
+}
+.login-decor {
+  position: absolute;
+  top: 50px;
+  left: 40px;
+  width: 200px;
+  height: auto;
+  opacity: 0.18;
+  z-index: 3;
+  pointer-events: none;
+  filter: saturate(0.95) contrast(1.05);
 }
 .brand-background {
   flex: 1;
@@ -358,5 +372,6 @@ const login = async () => {
   .login-panel { flex: 1; box-shadow: none; }
   .login-wrapper { margin: -1.2rem -1rem; }
   .login-card { padding: 1.5rem; }
+  .login-decor { width: 88px; top: 12px; left: 12px; opacity: 0.14; }
 }
 </style>

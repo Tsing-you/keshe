@@ -18,6 +18,7 @@ const sortKey = ref('default') // 'default' | 'orders' | 'rating'
 const sortDir = ref('desc') // 'asc' | 'desc'
 const reviewModal = ref({
     show: false,
+    mode: 'create',
     orderId: null,
     merchant_rating: 5,
     merchant_comment: '',
@@ -209,14 +210,32 @@ const completeOrder = async (orderId) => {
     }
 }
 
-const openReview = (orderId) => {
+const openReview = (order, mode = 'create') => {
+    const review = order.review || {}
     reviewModal.value = {
         show: true,
-        orderId,
-        merchant_rating: 5,
-        merchant_comment: '',
-        rider_rating: 5,
-        rider_comment: '',
+        mode,
+        orderId: order.id,
+        merchant_rating: Number(review.merchant_rating ?? 5),
+        merchant_comment: review.merchant_comment || '',
+        rider_rating: Number(review.rider_rating ?? 5),
+        rider_comment: review.rider_comment || '',
+    }
+}
+
+const deleteReview = async () => {
+    if (!confirm('确定删除这条评价吗？删除后订单将恢复为已确认收货状态。')) return
+    try {
+        const res = await api.post('/review/delete', { order_id: reviewModal.value.orderId })
+        if (res.data.ok) {
+            showToast('评价已删除', 'success')
+            reviewModal.value.show = false
+            fetchMyOrders()
+        } else {
+            showToast(res.data.error || '删除失败', 'error')
+        }
+    } catch(err) {
+        showToast(err.response?.data?.error || '请求失败', 'error')
     }
 }
 
@@ -434,7 +453,8 @@ const openContact = async (orderId) => {
             </div>
             <div class="order-footer">
                 <div class="total-price">总计: <span>￥{{ order.total_amount }}</span></div>
-                <button class="btn-outline btn-sm" v-if="order.status === 'completed'" @click="openReview(order.id)">评价订单</button>
+                <button class="btn-outline btn-sm" v-if="order.status === 'completed'" @click="openReview(order, 'create')">评价订单</button>
+                <button class="btn-outline btn-sm" v-else-if="order.status === 'reviewed' && order.review" @click="openReview(order, 'view')">查看评价</button>
                 <button class="btn-outline btn-sm" style="margin-left:8px" @click="openContact(order.id)">查看联系方式</button>
             </div>
         </div>
@@ -444,43 +464,65 @@ const openContact = async (orderId) => {
     <!-- Review Modal -->
     <div class="modal-overlay" v-if="reviewModal.show" @click.self="reviewModal.show = false">
         <div class="modal-card">
-            <h3>评价订单</h3>
-            <p class="text-gray text-sm mb-4">请分别评价商品/商家与骑手</p>
-            <div class="review-section">
-                <div class="review-title">商品与商家评价</div>
-                <div class="form-group">
-                    <label>评分 (1-5)</label>
-                    <div class="star-rating">
-                        <span v-for="star in 5" :key="'merchant-'+star"
-                              class="star"
-                              :class="{ active: star <= reviewModal.merchant_rating }"
-                              @click="reviewModal.merchant_rating = star">★</span>
+            <h3>{{ reviewModal.mode === 'view' ? '查看评价' : '评价订单' }}</h3>
+            <p class="text-gray text-sm mb-4" v-if="reviewModal.mode === 'view'">以下是你对该订单的评价，删除后可重新评价。</p>
+            <p class="text-gray text-sm mb-4" v-else>请分别评价商品/商家与骑手</p>
+
+            <template v-if="reviewModal.mode === 'view'">
+                <div class="review-section">
+                    <div class="review-title">商品与商家评价</div>
+                    <div class="review-stars">
+                        <span v-for="star in 5" :key="'merchant-view-'+star" class="star static" :class="{ active: star <= reviewModal.merchant_rating }">★</span>
+                    </div>
+                    <div class="review-comment-box">{{ reviewModal.merchant_comment || '未填写评价内容' }}</div>
+                </div>
+                <div class="review-section" style="margin-top: 1rem">
+                    <div class="review-title">骑手评价</div>
+                    <div class="review-stars">
+                        <span v-for="star in 5" :key="'rider-view-'+star" class="star static" :class="{ active: star <= reviewModal.rider_rating }">★</span>
+                    </div>
+                    <div class="review-comment-box">{{ reviewModal.rider_comment || '未填写评价内容' }}</div>
+                </div>
+            </template>
+
+            <template v-else>
+                <div class="review-section">
+                    <div class="review-title">商品与商家评价</div>
+                    <div class="form-group">
+                        <label>评分 (1-5)</label>
+                        <div class="star-rating">
+                            <span v-for="star in 5" :key="'merchant-'+star"
+                                  class="star"
+                                  :class="{ active: star <= reviewModal.merchant_rating }"
+                                  @click="reviewModal.merchant_rating = star">★</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>评价内容</label>
+                        <textarea v-model="reviewModal.merchant_comment" rows="3" placeholder="写点商品口味、包装、商家服务等..."></textarea>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>评价内容</label>
-                    <textarea v-model="reviewModal.merchant_comment" rows="3" placeholder="写点商品口味、包装、商家服务等..."></textarea>
-                </div>
-            </div>
-            <div class="review-section" style="margin-top: 1rem">
-                <div class="review-title">骑手评价</div>
-                <div class="form-group">
-                    <label>评分 (1-5)</label>
-                    <div class="star-rating">
-                        <span v-for="star in 5" :key="'rider-'+star"
-                              class="star"
-                              :class="{ active: star <= reviewModal.rider_rating }"
-                              @click="reviewModal.rider_rating = star">★</span>
+                <div class="review-section" style="margin-top: 1rem">
+                    <div class="review-title">骑手评价</div>
+                    <div class="form-group">
+                        <label>评分 (1-5)</label>
+                        <div class="star-rating">
+                            <span v-for="star in 5" :key="'rider-'+star"
+                                  class="star"
+                                  :class="{ active: star <= reviewModal.rider_rating }"
+                                  @click="reviewModal.rider_rating = star">★</span>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>评价内容</label>
+                        <textarea v-model="reviewModal.rider_comment" rows="3" placeholder="写点骑手送达速度、态度等..."></textarea>
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>评价内容</label>
-                    <textarea v-model="reviewModal.rider_comment" rows="3" placeholder="写点骑手送达速度、态度等..."></textarea>
-                </div>
-            </div>
+            </template>
             <div class="modal-actions">
                 <button class="btn-text" @click="reviewModal.show = false">取消</button>
-                <button @click="submitReview">提交评价</button>
+                <button v-if="reviewModal.mode === 'view'" class="btn-text" style="color:#ef4444" @click="deleteReview">删除评价</button>
+                <button v-else @click="submitReview">提交评价</button>
             </div>
         </div>
     </div>
@@ -557,6 +599,10 @@ const openContact = async (orderId) => {
 .star { font-size: 1.8rem; color: #e5e7eb; cursor: pointer; transition: color 0.2s; }
 .star.active { color: #f59e0b; }
 .star:hover { transform: scale(1.1); }
+.review-stars { display: flex; gap: 0.35rem; margin: 0.5rem 0 0.75rem; }
+.star.static { cursor: default; }
+.star.static:hover { transform: none; }
+.review-comment-box { background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px; padding: 0.85rem 1rem; color: #374151; min-height: 56px; white-space: pre-wrap; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 1rem; margin-top: 2rem; }
 .form-group { margin-bottom: 1.5rem; }
 .form-group label { display: block; font-size: 0.9rem; font-weight: 500; margin-bottom: 0.5rem; }

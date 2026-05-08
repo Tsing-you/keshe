@@ -358,6 +358,17 @@ def create_app():
             "is_available": int(dish.is_available),
         }
 
+    def serialize_order_review(order):
+        if not order.review:
+            return None
+        return {
+            "merchant_rating": order.review.rating,
+            "merchant_comment": order.review.comment or "",
+            "rider_rating": order.rider_review.rating if order.rider_review else None,
+            "rider_comment": order.rider_review.comment if order.rider_review else "",
+            "created_at": order.review.created_at.isoformat() if order.review.created_at else None,
+        }
+
     def serialize_order(order):
         return {
             "id": order.id,
@@ -369,6 +380,8 @@ def create_app():
             "total_amount": str(order.total_amount),
             "delivery_address": order.delivery_address,
             "created_at": order.created_at.isoformat() if order.created_at else None,
+            "has_review": bool(order.review),
+            "review": serialize_order_review(order),
             "items": [
                 {"dish_name": item.dish_name, "quantity": item.quantity, "subtotal": str(item.subtotal)}
                 for item in order.items
@@ -1208,6 +1221,31 @@ def create_app():
             db.add(rider_review)
             db.commit()
             return json_response({"ok": True, "message": "评价成功"})
+        except AuthError as ae:
+            db.rollback()
+            return json_response({"ok": False, "error": str(ae)}, ae.status)
+        except Exception as exc:
+            db.rollback()
+            return json_response({"ok": False, "error": str(exc)}, 400)
+        finally:
+            db.close()
+
+    @app.post("/review/delete")
+    def delete_review():
+        data = payload_from_request()
+        db = SessionLocal()
+        try:
+            user = authenticate(db, data)
+            order = db.get(Order, int(data.get("order_id", 0)))
+            if user.role != "customer" or not order or order.customer_id != user.id or order.status != "reviewed":
+                raise ValueError("该订单评价不存在或不可删除")
+            if order.review:
+                db.delete(order.review)
+            if order.rider_review:
+                db.delete(order.rider_review)
+            order.status = "completed"
+            db.commit()
+            return json_response({"ok": True, "message": "评价已删除"})
         except AuthError as ae:
             db.rollback()
             return json_response({"ok": False, "error": str(ae)}, ae.status)
